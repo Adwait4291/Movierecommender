@@ -1,0 +1,8 @@
+# requirements.txt
+
+Flask>=2.0       # Core web framework
+python-dotenv>=0.15 # For loading .env files
+pandas>=1.3      # For data manipulation
+scikit-learn>=1.0 # For TF-IDF, cosine_similarity
+Flask-WTF>=1.0    # For Flask forms integration (includes WTForms)
+joblib>=1.0      # For saving/loading Python objects efficiently (esp. NumPy arrays)
