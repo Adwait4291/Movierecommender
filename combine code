@@ -1,0 +1,1273 @@
+
+
+---------------
+app.py
+-----------------
+import random  # Import the random module for generating random numbers
+import requests  # Import the requests module for making HTTP requests
+import pickle  # Import the pickle module for serializing and deserializing Python objects
+import pandas as pd  # Import the pandas module and alias it as pd for data manipulation
+from flask import Flask, jsonify, render_template, request, url_for  # Import specific functions from Flask for web development
+from sklearn.feature_extraction.text import TfidfVectorizer  # Import TfidfVectorizer for text feature extraction
+from sklearn.metrics.pairwise import cosine_similarity  # Import cosine_similarity for calculating cosine similarity between vectors
+from sklearn.neighbors import NearestNeighbors  # Import NearestNeighbors for implementing the k-nearest neighbors algorithm
+from sklearn.preprocessing import MinMaxScaler  # Import MinMaxScaler for scaling data
+
+app = Flask(__name__)  # Create a Flask application instance
+TMDB_API_KEY = '6cde659ecb5e362ef41ac1d4ff221ddd'  # Define the TMDB API key
+
+
+# Fetch movies from TMDb
+def fetch_movies_from_tmdb():
+    movies = []  # Initialize an empty list to store movie data
+    for page in range(1, 6):  # Loop through the first 5 pages of popular movies
+        url = f'https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching popular movies
+        response = requests.get(url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        movies.extend(data['results'])  # Extend the movies list with the results from the current page
+    return pd.DataFrame(movies)  # Convert the movies list to a pandas DataFrame and return it
+
+
+def fetch_movie_details(movie_id):
+    url = f'https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie details
+    response = requests.get(url)  # Send an HTTP GET request to the URL
+    return response.json()  # Parse the response as JSON and return it
+
+
+def fetch_movie_cast(movie_id):
+    url = f'https://api.themoviedb.org/3/movie/{movie_id}/credits?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie cast
+    response = requests.get(url)  # Send an HTTP GET request to the URL
+    return response.json()['cast']  # Parse the response as JSON and return the cast
+
+
+# Load movie data
+movies_df = fetch_movies_from_tmdb()  # Fetch movies from TMDb and store them in a DataFrame
+movies_df['details'] = movies_df['id'].apply(fetch_movie_details)  # Apply fetch_movie_details to each movie and store the result in a new column
+movies_df['genres'] = movies_df['details'].apply(lambda x: ', '.join([genre['name'] for genre in x['genres']]))  # Extract genres from details and join them into a single string
+movies_df['overview'] = movies_df['overview'].fillna('')  # Fill missing overviews with an empty string
+movies_df['content'] = movies_df['genres'] + ' ' + movies_df['overview']  # Combine genres and overview into a single content column
+
+# Build content-based filtering model
+tfidf = TfidfVectorizer(stop_words='english')  # Initialize a TF-IDF Vectorizer with English stop words
+tfidf_matrix = tfidf.fit_transform(movies_df['content'])  # Fit and transform the content column to a TF-IDF matrix
+cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)  # Compute cosine similarity between all movie vectors
+
+
+# Function to get content-based recommendations
+def get_content_based_recommendations(movie_id, cosine_sim=cosine_sim):
+    if movie_id not in movies_df['id'].values:  # Check if the movie ID is in the DataFrame
+        return []  # Return an empty list if not found
+    idx = movies_df.index[movies_df['id'] == movie_id].tolist()[0]  # Get the index of the movie
+    sim_scores = list(enumerate(cosine_sim[idx]))  # Get similarity scores for the movie
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)  # Sort similarity scores in descending order
+    sim_scores = sim_scores[1:11]  # Get the top 10 similar movies (excluding the movie itself)
+    movie_indices = [i[0] for i in sim_scores]  # Extract movie indices from the similarity scores
+    return movies_df['id'].iloc[movie_indices].tolist()  # Return the IDs of the recommended movies
+
+
+# Fetch ratings for collaborative filtering
+def fetch_ratings():
+    ratings = []  # Initialize an empty list to store rating data
+    for page in range(1, 6):  # Loop through the first 5 pages of top-rated movies
+        url = f'https://api.themoviedb.org/3/movie/top_rated?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching top-rated movies
+        response = requests.get(url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        ratings.extend(data['results'])  # Extend the ratings list with the results from the current page
+    return pd.DataFrame(ratings)  # Convert the ratings list to a pandas DataFrame and return it
+
+
+# Prepare data for collaborative filtering
+ratings_df = fetch_ratings()  # Fetch ratings from TMDb and store them in a DataFrame
+ratings_df['user_id'] = ratings_df.index  # Assign user IDs based on the DataFrame index
+ratings_matrix = pd.pivot_table(ratings_df, values='vote_average', index='user_id', columns='id').fillna(0)  # Pivot the DataFrame to create a user-item matrix and fill missing values with 0
+
+# Normalize ratings
+scaler = MinMaxScaler()  # Initialize a MinMaxScaler
+ratings_matrix = scaler.fit_transform(ratings_matrix)  # Scale the ratings matrix to the range [0, 1]
+
+# Build k-NN model for collaborative filtering
+knn = NearestNeighbors(metric='cosine', algorithm='brute', n_neighbors=20)  # Initialize a k-NN model with cosine similarity and brute-force search
+knn.fit(ratings_matrix)  # Fit the k-NN model to the ratings matrix
+
+
+# Function to get collaborative recommendations
+def get_collaborative_recommendations(movie_id, knn_model=knn):
+    if movie_id not in ratings_df['id'].values:  # Check if the movie ID is in the DataFrame
+        return []  # Return an empty list if not found
+    movie_idx = list(ratings_df['id']).index(movie_id)  # Get the index of the movie
+    distances, indices = knn_model.kneighbors(ratings_matrix[:, movie_idx].reshape(1, -1), n_neighbors=11)  # Find the nearest neighbors
+    movie_indices = [ratings_df['id'].iloc[i] for i in indices.flatten()][1:]  # Extract movie indices from the neighbor indices
+    return movie_indices  # Return the IDs of the recommended movies
+
+
+# Combine both approaches for recommendations
+def get_combined_recommendations(movie_id):
+    content_based_recs = get_content_based_recommendations(movie_id)  # Get content-based recommendations
+    collaborative_recs = get_collaborative_recommendations(movie_id)  # Get collaborative recommendations
+    combined_recs = list(set(content_based_recs + collaborative_recs))  # Combine and deduplicate the recommendations
+    if len(combined_recs) == 0:  # If no recommendations found in DataFrame, fetch from TMDb
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}/recommendations?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie recommendations
+        response = requests.get(url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        combined_recs = [movie['id'] for movie in data['results']]  # Extract movie IDs from the results
+    return combined_recs[:10]  # Return the top 10 recommendations
+
+
+# Save the model
+with open('recommendation_model.pkl', 'wb') as f:
+    pickle.dump({
+        'tfidf': tfidf,
+        'cosine_sim': cosine_sim,
+        'knn': knn,
+        'movies_df': movies_df
+    }, f)  # Serialize and save the recommendation model components to a file
+
+# Load the recommendation model
+with open('recommendation_model.pkl', 'rb') as f:
+    recommendation_model = pickle.load(f)  # Load the recommendation model components from the file
+
+tfidf = recommendation_model['tfidf']  # Assign the loaded TF-IDF vectorizer to a variable
+cosine_sim = recommendation_model['cosine_sim']  # Assign the loaded cosine similarity matrix to a variable
+knn = recommendation_model['knn']  # Assign the loaded k-NN model to a variable
+movies_df = recommendation_model['movies_df']  # Assign the loaded movies DataFrame to a variable
+
+
+def fetch_trailer(movie_id):
+    url = f'https://api.themoviedb.org/3/movie/{movie_id}/videos?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie trailers
+    response = requests.get(url)  # Send an HTTP GET request to the URL
+    data = response.json()  # Parse the response as JSON
+    trailers = [video for video in data.get('results', []) if video['type'] == 'Trailer' and video['site'] == 'YouTube']  # Filter trailers from the results
+    for trailer in trailers:
+        if trailer:
+            return f"https://www.youtube.com/embed/{trailer['key']}"  # Return the YouTube embed URL for the trailer
+    return None  # Return None if no trailers found
+
+
+def get_full_language_name(language_code):
+    languages = {
+        'en': 'English',
+        'es': 'Spanish',
+        'fr': 'French',
+        'de': 'German',
+        'it': 'Italian',
+        'ja': 'Japanese',
+        'zh': 'Chinese',
+        # Add other languages as needed
+    }  # Define a dictionary mapping language codes to full names
+    return languages.get(language_code, language_code)  # Return the full language name or the code if not found
+
+
+@app.route('/')
+def index():
+    for page in range(1, 11):
+        popular_movies_url = f'https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching popular movies
+        response = requests.get(popular_movies_url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        movies = [movie for movie in data.get('results', []) if movie['poster_path']]  # Filter movies with poster paths
+        for movie in movies:
+            trailer_url = fetch_trailer(movie['id'])  # Fetch the trailer URL for the movie
+            if trailer_url:
+                return render_template('index.html', trailer_url=trailer_url, trailer_title=movie['title'])  # Render the index template with trailer data
+    return render_template('index.html', trailer_url=None, trailer_title='')  # Render the index template without trailer data
+
+
+@app.route('/search')
+def search():
+    query = request.args.get('query', '')  # Get the search query from the request arguments
+    search_url = f'https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&language=en-US&query={query}&page=1&include_adult=false'  # Define the URL for searching movies
+    response = requests.get(search_url)  # Send an HTTP GET request to the URL
+    data = response.json()  # Parse the response as JSON
+    results = data.get('results', [])  # Get the search results
+    valid_results = [movie for movie in results if movie['poster_path']]  # Filter movies with poster paths
+
+    trailer_url = None
+    trailer_title = ''
+    for movie in valid_results:
+        trailer_url = fetch_trailer(movie['id'])  # Fetch the trailer URL for the movie
+        trailer_title = movie['title']
+        if trailer_url:
+            break
+
+    return jsonify({
+        'results': valid_results,
+        'trailer_url': trailer_url,
+        'trailer_title': trailer_title
+    })  # Return the search results and trailer data as JSON
+
+
+@app.route('/default_movies')
+def default_movies():
+    trending_movies = []
+    for page in range(1, 11):
+        popular_movies_url = f'https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching popular movies
+        response = requests.get(popular_movies_url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        trending_movies.extend([movie for movie in data.get('results', []) if movie['poster_path']])  # Filter and extend the trending movies list
+        if len(trending_movies) >= 200:
+            break
+
+    return jsonify({
+        'trending_movies': trending_movies[:200]
+    })  # Return the top 200 trending movies as JSON
+
+
+@app.route('/top_ten_movies')
+def top_ten_movies():
+    top_ten_movies = []
+    for page in range(1, 2):
+        top_ten_movies_url = f'https://api.themoviedb.org/3/movie/top_rated?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching top-rated movies
+        response = requests.get(top_ten_movies_url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        top_ten_movies.extend([movie for movie in data.get('results', []) if movie['poster_path']])  # Filter and extend the top 10 movies list
+        if len(top_ten_movies) >= 10:
+            break
+
+    return jsonify({
+        'top_ten_movies': top_ten_movies[:10]
+    })  # Return the top 10 movies as JSON
+
+
+@app.route('/recommend', methods=['POST'])
+def recommend():
+    movie_id = request.json.get('movie_id')  # Get the movie ID from the request JSON
+    recommendations = get_combined_recommendations(movie_id)  # Get combined recommendations for the movie
+
+    recommend_movies = []
+    for idx in recommendations:
+        movie_url = f'https://api.themoviedb.org/3/movie/{idx}?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie details
+        response = requests.get(movie_url)  # Send an HTTP GET request to the URL
+        movie_data = response.json()  # Parse the response as JSON
+        if 'poster_path' in movie_data and movie_data['poster_path']:
+            recommend_movies.append(movie_data)  # Append movie data to the recommended movies list
+
+    main_movie_url = f'https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching the main movie details
+    response = requests.get(main_movie_url)  # Send an HTTP GET request to the URL
+    main_movie = response.json()  # Parse the response as JSON
+
+    return jsonify({
+        'main_movie': main_movie,
+        'similar_movies': recommend_movies
+    })  # Return the main movie and similar movies as JSON
+
+
+@app.route('/movie_details/<int:movie_id>')
+def movie_details(movie_id):
+    movie_url = f'https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie details
+    response = requests.get(movie_url)  # Send an HTTP GET request to the URL
+    movie_data = response.json()  # Parse the response as JSON
+
+    cast_url = f'https://api.themoviedb.org/3/movie/{movie_id}/credits?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie cast
+    response = requests.get(cast_url)  # Send an HTTP GET request to the URL
+    cast_data = response.json()  # Parse the response as JSON
+    top_cast = [cast['name'] for cast in cast_data['cast'][:5]]  # Get the top 5 cast members
+    top_cast_photos = [{'name': cast['name'], 'character': cast['character'], 'profile_path': cast['profile_path']} for cast in cast_data['cast'][:5] if cast['profile_path']]  # Get the top 5 cast photos
+
+    trailer_url = fetch_trailer(movie_id)  # Fetch the trailer URL for the movie
+    if not trailer_url:
+        trailer_url = url_for('static', filename='img/img2.png')  # Use a default image if no trailer found
+
+    trending_movies = []
+    for page in range(1, 11):
+        popular_movies_url = f'https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching popular movies
+        response = requests.get(popular_movies_url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        trending_movies.extend([movie for movie in data.get('results', []) if movie['poster_path']])  # Filter and extend the trending movies list
+        if len(trending_movies) >= 200:
+            break
+
+    genre_names = [genre['name'] for genre in movie_data['genres']]  # Convert genre IDs to names
+    movie_data['genres'] = ', '.join(genre_names)  # Join the genre names into a single string
+
+    movie_data['original_language'] = get_full_language_name(movie_data['original_language'])  # Convert language code to full name
+
+    recommend_movies = get_combined_recommendations(movie_id)  # Get combined recommendations for the movie
+    recommend_movie_data = []
+    for idx in recommend_movies:
+        movie_url = f'https://api.themoviedb.org/3/movie/{idx}?api_key={TMDB_API_KEY}&language=en-US'  # Define the URL for fetching movie details
+        response = requests.get(movie_url)  # Send an HTTP GET request to the URL
+        rec_movie_data = response.json()  # Parse the response as JSON
+        if 'poster_path' in rec_movie_data and rec_movie_data['poster_path']:
+            recommend_movie_data.append(rec_movie_data)  # Append movie data to the recommended movies list
+
+    return render_template('movie_details.html', movie=movie_data, top_cast=top_cast, top_cast_photos=top_cast_photos, trailer_url=trailer_url,
+                           trending_movies=trending_movies[:200], recommend_movies=recommend_movie_data)  # Render the movie details template with the movie data
+
+
+@app.route('/people_also_watch')
+def people_also_watch():
+    all_movies = []
+    for page in range(1, 21):
+        popular_movies_url = f'https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API_KEY}&language=en-US&page={page}'  # Define the URL for fetching popular movies
+        response = requests.get(popular_movies_url)  # Send an HTTP GET request to the URL
+        data = response.json()  # Parse the response as JSON
+        all_movies.extend([movie for movie in data.get('results', []) if movie['poster_path']])  # Filter and extend the all movies list
+        if len(all_movies) >= 600:
+            break
+
+    all_movies = {movie['id']: movie for movie in all_movies}.values()  # Remove duplicates and keep the first 500 unique movies
+    return jsonify({
+        'people_also_watch': list(all_movies)[:500]
+    })  # Return the top 500 movies as JSON
+
+
+if __name__ == '__main__':
+    app.run(debug=True)  # Run the Flask application in debug mode
+
+
+
+
+---------------
+index.html
+---------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Recommendation System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        @font-face {
+            font-family: 'Gagalin';
+            src: url('{{ url_for('static', filename='fonts/Gagalin-Regular.ttf') }}');
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow-x: hidden;
+            background: none; /* Remove general background */
+        }
+        .video-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh; /* Full screen height */
+            overflow: hidden;
+            z-index: -1;
+        }
+        .video-header .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1;
+        }
+        .video-header iframe {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 100%;
+            height: 100%;
+            transform: translate(-50%, -50%);
+            z-index: 0;
+            pointer-events: none;
+            object-fit: cover;
+        }
+        .header-content {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 2;
+            text-align: center;
+            color: white;
+            padding: 20px;
+            background-color: red;
+            border-radius: 10px;
+        }
+        .movie-title-overlay {
+            position: absolute;
+            top: 10%;
+            left: 5%;
+            z-index: 3;
+            font-family: 'Gagalin', sans-serif;
+            font-size: 6em;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+            white-space: pre-wrap; /* Allow text wrapping */
+        }
+        .logo {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 3;
+            width: 150px; /* Adjust the size as needed */
+        }
+        .content-container {
+            width: 100%;
+            margin: 0 auto;
+            padding: 20px;
+            margin-top: 100vh; /* Push the content below the full-screen header */
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .search-icon {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 3;
+            cursor: pointer;
+            width: 60px; /* Increase the size of the search gif */
+            height: 60px; /* Increase the size of the search gif */
+        }
+        .search-form {
+            position: absolute;
+            display: none;
+            align-items: center;
+            background-color: red; /* Red background */
+            padding: 10px;
+            border-radius: 30px; /* Round corners */
+            z-index: 4; /* Ensure search form is above other elements while dragging */
+            top: 20px;
+            right: 20px;
+            width: 400px; /* Set the fixed width of the search bar */
+        }
+        .search-form input[type="text"] {
+            width: 0;
+            padding: 10px;
+            font-size: 1em;
+            border: none;
+            outline: none;
+            background: white;
+            color: black;
+            transition: width 0.5s ease;
+            border-radius: 30px; /* Round corners */
+        }
+        .search-form input[type="text"]:focus {
+            width: 300px; /* Adjust width as needed */
+            background-color: white;
+        }
+        .search-form button {
+            background: none;
+            border: none;
+            cursor: pointer;
+            margin-left: 10px;
+            color: white; /* Change the text color to white */
+            font-size: 1em;
+        }
+        .suggestions {
+            position: absolute;
+            z-index: 3;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none; /* Initially hidden */
+            background: red;
+            color: white;
+            border-radius: 0 0 5px 5px;
+        }
+        .suggestion-item {
+            padding: 10px;
+            cursor: pointer;
+        }
+        .suggestion-item:hover {
+            background: #ff4d4d;
+        }
+        .movie-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .movie-row {
+            display: flex;
+            overflow-x: auto;
+            gap: 10px;
+        }
+        .movie-item {
+            text-align: center;
+            min-width: 200px; /* Increased width */
+            flex: 0 0 auto;
+            background: transparent; /* Transparent background */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .movie-item img {
+            width: 200px; /* Increased width */
+            height: 300px; /* Increased height */
+            object-fit: cover; /* Ensure the image covers the entire area */
+        }
+        .movie-item .view-details-button,
+        .movie-item .watch-now-button {
+            margin-top: 10px;
+            padding: 10px 20px;
+            background: red;
+            color: white;
+            border: none;
+            cursor: pointer;
+            width: 200px; /* Match the width of the movie thumbnail */
+            font-size: 1em;
+            border-radius: 5px;
+        }
+        .movie-item .watch-now-button {
+            background: red;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); /* Increased min width */
+            gap: 20px;
+        }
+        #main-movie {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .movie-details {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .movie-details iframe, .movie-details img {
+            margin-bottom: 20px;
+        }
+        .movie-info {
+            display: flex;
+            flex-direction: row;
+            align-items: flex-start;
+            gap: 20px;
+        }
+        .movie-info img {
+            width: 300px;
+            height: auto;
+        }
+        .movie-info div {
+            max-width: 600px;
+        }
+        .section-title {
+            color: white;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <header class="video-header">
+        <div class="overlay"></div>
+        <div class="movie-title-overlay" id="movie-title">{{ trailer_title }}</div>
+        <iframe id="background-video" src="{{ trailer_url }}?autoplay=1&loop=1&playlist={{ trailer_url.split('embed/')[1] if trailer_url else '' }}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen loop></iframe>
+    </header>
+    <img src="{{ url_for('static', filename='img/logo.gif') }}" alt="Logo" class="logo"> <!-- Logo added here -->
+    <img src="{{ url_for('static', filename='search.gif') }}" alt="Search" class="search-icon" id="search-icon">
+    <form id="search-form" class="search-form">
+        <input type="text" name="query" id="search-input" placeholder="Search for a movie, tv show, person..." autocomplete="off">
+        <button type="submit" id="search-button">Search</button>
+    </form>
+    <div id="suggestions" class="suggestions"></div>
+    <div class="content-container" style="background: none;">
+        <div id="search-results">
+            <h2 class="section-title">Search Results</h2>
+            <div id="search-results-list" class="movie-grid"></div>
+        </div>
+        <div id="default-movies">
+            <h2 class="section-title">Top 10 Movies in the U.S. Today</h2>
+            <div id="top-10-movies-list" class="movie-row"></div>
+            <h2 class="section-title">Trending</h2>
+            <div id="trending-movies-list" class="movie-row"></div>
+            <h2 class="section-title">Popular Trailers</h2>
+            <div id="latest-trailers-list" class="movie-row"></div>
+            <h2 class="section-title">People Also Watch</h2>
+            <div id="people-also-watch-list" class="movie-grid"></div>
+        </div>
+        <div id="recommendations" style="display: none;">
+            <h2 class="section-title">Recommended Movies</h2>
+            <div id="main-movie" class="movie-item"></div>
+            <div id="recommendations-list" class="movie-row"></div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
+
+
+-----------------
+movie_details.html
+--------------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Details</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        @font-face {
+            font-family: 'Gagalin';
+            src: url('{{ url_for('static', filename='fonts/Gagalin-Regular.ttf') }}');
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow-x: hidden;
+            background: none; /* Remove general background */
+        }
+        .video-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh; /* Full screen height */
+            overflow: hidden;
+            z-index: -1;
+        }
+        .video-header .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1;
+        }
+        .video-header iframe {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 100%;
+            height: 100%;
+            transform: translate(-50%, -50%);
+            z-index: 0;
+            pointer-events: none;
+            object-fit: cover;
+        }
+        .movie-title-overlay {
+            position: absolute;
+            top: 10%;
+            left: 5%;
+            z-index: 3;
+            font-family: 'Gagalin', sans-serif;
+            font-size: 6em;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+            white-space: pre-wrap; /* Allow text wrapping */
+        }
+        .logo {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 3;
+            width: 150px; /* Adjust the size as needed */
+        }
+        .content-container {
+            width: 100%;
+            margin: 0 auto;
+            padding: 20px;
+            margin-top: 100vh; /* Push the content below the full-screen header */
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .movie-details {
+            display: flex;
+            flex-direction: row; /* Change to row to align image and details horizontally */
+            align-items: flex-start; /* Align items to the start */
+            color: white; /* Make text white */
+            gap: 20px; /* Add space between the image and the text */
+        }
+        .movie-info {
+            display: flex;
+            flex-direction: column; /* Change to column to align text vertically */
+            align-items: flex-start;
+            gap: 20px;
+            color: white; /* Make text white */
+        }
+        .movie-info img {
+            width: 300px;
+            height: auto;
+            margin-right: 20px; /* Add some space between the image and the details */
+        }
+        .movie-info div {
+            max-width: 600px;
+            text-align: left; /* Align text to the left */
+        }
+        .section-title {
+            color: white;
+            font-weight: bold;
+        }
+        .movie-item {
+            text-align: center;
+            min-width: 200px; /* Increased width */
+            flex: 0 0 auto;
+            background: transparent; /* Transparent background */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .movie-item img {
+            width: 200px; /* Increased width */
+            height: 300px; /* Increased height */
+            object-fit: cover; /* Ensure the image covers the entire area */
+        }
+        .movie-item .view-details-button,
+        .movie-item .watch-now-button {
+            margin-top: 10px;
+            padding: 10px 20px;
+            background: red; /* Solid red background */
+            color: white;
+            border: none;
+            cursor: pointer;
+            width: 200px; /* Match the width of the movie thumbnail */
+            font-size: 1em;
+            border-radius: 5px;
+        }
+        .movie-item .watch-now-button {
+            background: red;
+        }
+        .top-cast {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .cast-item {
+            text-align: center;
+        }
+        .cast-item img {
+            width: 150px;
+            height: 225px;
+            object-fit: cover;
+            border-radius: 10px;
+        }
+        .cast-item p {
+            margin: 5px 0;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <header class="video-header">
+        <div class="overlay"></div>
+        <div class="movie-title-overlay" id="movie-title">{{ movie.title }}</div>
+        <iframe id="background-video" src="{{ trailer_url }}?autoplay=1&loop=1&playlist={{ trailer_url.split('embed/')[1] if trailer_url else '' }}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen loop></iframe>
+    </header>
+    <img src="{{ url_for('static', filename='img/logo.gif') }}" alt="Logo" class="logo"> <!-- Logo added here -->
+    <div class="content-container" style="background: none;">
+        <div class="movie-details">
+            <img src="https://image.tmdb.org/t/p/w300{{ movie.poster_path }}" alt="{{ movie.title }}">
+            <div class="movie-info">
+                <div>
+                    <h1>{{ movie.title }}</h1>
+                    <p><strong>Genre:</strong> {{ movie.genres }}</p>
+                    <p><strong>Year:</strong> {{ movie.release_date }}</p>
+                    <p><strong>Top Cast:</strong> {{ top_cast | join(', ') }}</p>
+                    <p><strong>Original Language:</strong> {{ movie.original_language }}</p>
+                    <p><strong>Status:</strong> {{ movie.status }}</p>
+                    <p><strong>Budget:</strong> ${{ movie.budget }}</p>
+                    <p><strong>Summary:</strong> {{ movie.overview }}</p>
+
+                </div>
+            </div>
+        </div>
+        <h2 class="section-title">Top Billed Cast</h2>
+        <div class="top-cast">
+            {% for cast in top_cast_photos %}
+            <div class="cast-item">
+                <img src="https://image.tmdb.org/t/p/w200{{ cast.profile_path }}" alt="{{ cast.name }}">
+                <p><strong>{{ cast.name }}</strong></p>
+                <p>{{ cast.character }}</p>
+            </div>
+            {% endfor %}
+        </div>
+        <h2 class="section-title">Recommended Movies</h2>
+        <div class="movie-row">
+            {% for rec_movie in recommend_movies %}
+            <div class="movie-item">
+                <img src="https://image.tmdb.org/t/p/w200{{ rec_movie.poster_path }}" alt="{{ rec_movie.title }}">
+                <button class="watch-now-button" onclick="viewMovieDetails({{ rec_movie.id }})">WATCH NOW</button>
+            </div>
+            {% endfor %}
+        </div>
+        <div id="default-movies">
+            <h2 class="section-title">Trending</h2>
+            <div id="trending-movies-list" class="movie-row"></div>
+            <h2 class="section-title">Popular Trailers</h2>
+            <div id="latest-trailers-list" class="movie-row"></div>
+        </div>
+    </div>
+    <script>
+        function viewMovieDetails(movieId) {
+            window.location.href = `/movie_details/${movieId}`;
+        }
+    </script>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
+
+
+--------------
+script.js
+----------------
+document.addEventListener('DOMContentLoaded', function() {
+    fetchDefaultMovies();
+    fetchTopTenMovies();
+    fetchPeopleAlsoWatchMovies();
+    const searchIcon = document.getElementById('search-icon');
+    const searchForm = document.getElementById('search-form');
+    const searchInput = document.getElementById('search-input');
+    const suggestions = document.getElementById('suggestions');
+    const movieTitleOverlay = document.getElementById('movie-title');
+
+    searchIcon.addEventListener('click', function() {
+        searchForm.style.display = 'flex';
+        searchIcon.style.display = 'none';
+        searchInput.focus();
+    });
+
+    searchInput.addEventListener('blur', function() {
+        if (this.value === '') {
+            searchForm.style.display = 'none';
+            searchIcon.style.display = 'block';
+        }
+    });
+
+    searchInput.addEventListener('input', handleInput);
+    document.getElementById('search-form').addEventListener('submit', handleSearch);
+
+    // Enable dragging functionality
+    makeElementDraggable(searchForm);
+
+    // Wrap the movie title text for the details page
+    if (movieTitleOverlay) {
+        movieTitleOverlay.innerText = wrapText(movieTitleOverlay.innerText, 3);
+    }
+});
+
+function handleInput(event) {
+    const query = event.target.value;
+    if (query.length > 1) {
+        fetch(`/search?query=${query}`)
+        .then(response => response.json())
+        .then(data => {
+            const suggestions = data.results.map(item => `<div class="suggestion-item" onclick="selectSuggestion('${item.title}')">${item.title}</div>`).join('');
+            document.getElementById('suggestions').innerHTML = suggestions;
+            document.getElementById('suggestions').style.display = 'block';
+
+            const trailerVideo = document.getElementById('background-video');
+            const movieTitleOverlay = document.getElementById('movie-title');
+            if (data.trailer_url) {
+                trailerVideo.src = `${data.trailer_url}?autoplay=1&loop=1&playlist=${data.trailer_url.split('embed/')[1]}`;
+                movieTitleOverlay.innerText = wrapText(data.trailer_title, 3);
+            }
+            updateSuggestionsPosition();
+        })
+        .catch(error => console.error('Error fetching suggestions:', error));
+    } else {
+        document.getElementById('suggestions').style.display = 'none';
+    }
+}
+
+function wrapText(text, maxWordsPerLine) {
+    const words = text.split(' ');
+    let wrappedText = '';
+    for (let i = 0; i < words.length; i += maxWordsPerLine) {
+        wrappedText += words.slice(i, i + maxWordsPerLine).join(' ') + '\n';
+    }
+    return wrappedText;
+}
+
+function selectSuggestion(title) {
+    document.getElementById('search-input').value = title;
+    document.getElementById('suggestions').style.display = 'none';
+}
+
+function handleSearch(event) {
+    event.preventDefault();
+    const query = document.querySelector('input[name="query"]').value;
+    fetch(`/search?query=${query}`)
+    .then(response => response.json())
+    .then(data => {
+        const searchResultsList = document.getElementById('search-results-list');
+        searchResultsList.innerHTML = '';
+
+        const trailerVideo = document.getElementById('background-video');
+        const movieTitleOverlay = document.getElementById('movie-title');
+        if (data.trailer_url) {
+            trailerVideo.src = `${data.trailer_url}?autoplay=1&loop=1&playlist=${data.trailer_url.split('embed/')[1]}`;
+            movieTitleOverlay.innerText = wrapText(data.trailer_title, 3);
+        }
+
+        data.results.forEach((movie, index) => {
+            if (index % 6 === 0) searchResultsList.appendChild(document.createElement('div')).classList.add('movie-row');
+            const movieDiv = document.createElement('div');
+            movieDiv.classList.add('movie-item');
+            movieDiv.innerHTML = `
+                <img src="https://image.tmdb.org/t/p/w200${movie.poster_path}" alt="${movie.title}">
+                <button class="view-details-button" onclick="viewMovieDetails(${movie.id})">View Details</button>
+            `;
+            searchResultsList.lastChild.appendChild(movieDiv);
+        });
+    })
+    .catch(error => console.error('Error fetching search results:', error));
+}
+
+function fetchDefaultMovies() {
+    fetch('/default_movies')
+    .then(response => response.json())
+    .then(data => {
+        const trendingMoviesList = document.getElementById('trending-movies-list');
+        const latestTrailersList = document.getElementById('latest-trailers-list');
+
+        trendingMoviesList.innerHTML = '';
+        latestTrailersList.innerHTML = '';
+
+        data.trending_movies.slice(0, 100).forEach((movie, index) => {
+            if (index % 100 === 0) trendingMoviesList.appendChild(document.createElement('div')).classList.add('movie-row');
+            const movieDiv = document.createElement('div');
+            movieDiv.classList.add('movie-item');
+            movieDiv.innerHTML = `
+                <img src="https://image.tmdb.org/t/p/w200${movie.poster_path}" alt="${movie.title}">
+                <button class="watch-now-button" onclick="viewMovieDetails(${movie.id})">WATCH NOW</button>
+            `;
+            trendingMoviesList.lastChild.appendChild(movieDiv);
+        });
+
+        data.trending_movies.slice(100, 200).forEach((movie, index) => {
+            if (index % 100 === 0) latestTrailersList.appendChild(document.createElement('div')).classList.add('movie-row');
+            const movieDiv = document.createElement('div');
+            movieDiv.classList.add('movie-item');
+            movieDiv.innerHTML = `
+                <img src="https://image.tmdb.org/t/p/w200${movie.poster_path}" alt="${movie.title}">
+                <button class="watch-now-button" onclick="viewMovieDetails(${movie.id})">WATCH NOW</button>
+            `;
+            latestTrailersList.lastChild.appendChild(movieDiv);
+        });
+    })
+    .catch(error => console.error('Error fetching default movies:', error));
+}
+
+function fetchTopTenMovies() {
+    fetch('/top_ten_movies')
+    .then(response => response.json())
+    .then(data => {
+        const topTenMoviesList = document.getElementById('top-10-movies-list');
+        topTenMoviesList.innerHTML = '';
+
+        data.top_ten_movies.forEach((movie, index) => {
+            const movieDiv = document.createElement('div');
+            movieDiv.classList.add('movie-item');
+            movieDiv.innerHTML = `
+                <div class="top-movie-number">${index + 1}</div>
+                <img src="https://image.tmdb.org/t/p/w200${movie.poster_path}" alt="${movie.title}">
+                <button class="recently-added-button" onclick="viewMovieDetails(${movie.id})">Recently Added</button>
+            `;
+            topTenMoviesList.appendChild(movieDiv);
+        });
+    })
+    .catch(error => console.error('Error fetching top 10 movies:', error));
+}
+
+function fetchPeopleAlsoWatchMovies() {
+    fetch('/people_also_watch')
+    .then(response => response.json())
+    .then(data => {
+        const peopleAlsoWatchList = document.getElementById('people-also-watch-list');
+        peopleAlsoWatchList.innerHTML = '';
+
+        data.people_also_watch.forEach((movie, index) => {
+            if (index % 50 === 0) peopleAlsoWatchList.appendChild(document.createElement('div')).classList.add('movie-row');
+            const movieDiv = document.createElement('div');
+            movieDiv.classList.add('movie-item');
+            movieDiv.innerHTML = `
+                <img src="https://image.tmdb.org/t/p/w200${movie.poster_path}" alt="${movie.title}">
+                <button class="watch-now-button" onclick="viewMovieDetails(${movie.id})">WATCH NOW</button>
+            `;
+            peopleAlsoWatchList.lastChild.appendChild(movieDiv);
+        });
+    })
+    .catch(error => console.error('Error fetching ' + 'People Also Watch' + ' movies:', error));
+}
+
+function viewMovieDetails(movieId) {
+    window.location.href = `/movie_details/${movieId}`;
+}
+
+function makeElementDraggable(element) {
+    let isDragging = false;
+    let offsetX, offsetY;
+
+    element.addEventListener('mousedown', function(e) {
+        isDragging = true;
+        offsetX = e.clientX - parseInt(window.getComputedStyle(element).left);
+        offsetY = e.clientY - parseInt(window.getComputedStyle(element).top);
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+        element.style.zIndex = 5; // Bring the search form to the top while dragging
+    });
+
+    function onMouseMove(e) {
+        if (isDragging) {
+            element.style.left = `${e.clientX - offsetX}px`;
+            element.style.top = `${e.clientY - offsetY}px`;
+            updateSuggestionsPosition();
+        }
+    }
+
+    function onMouseUp() {
+        isDragging = false;
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        element.style.zIndex = 4; // Reset z-index after dragging
+    }
+
+    function updateSuggestionsPosition() {
+        const suggestions = document.getElementById('suggestions');
+        suggestions.style.left = element.style.left;
+        suggestions.style.top = `${parseInt(element.style.top) + element.offsetHeight}px`;
+    }
+}
+
+
+--------------
+style.css
+---------------
+body {
+    font-family: Arial, sans-serif;
+    color: #333;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+    background: none; /* Remove general background */
+}
+
+.video-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100vh; /* Full screen height */
+    overflow: hidden;
+    z-index: -1;
+}
+
+.video-header .overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 1;
+}
+
+.video-header iframe {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 100%;
+    height: 100%;
+    transform: translate(-50%, -50%);
+    z-index: 0;
+    pointer-events: none;
+    object-fit: cover;
+}
+
+.header-content {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    text-align: center;
+    color: white;
+    padding: 20px;
+    background-color: red;
+    border-radius: 10px;
+}
+
+.search-icon {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    z-index: 3;
+    cursor: pointer;
+    width: 60px; /* Increase the size of the search gif */
+    height: 60px; /* Increase the size of the search gif */
+}
+
+.search-form {
+    position: absolute;
+    display: none;
+    align-items: center;
+    background-color: red; /* Red background */
+    padding: 10px;
+    border-radius: 30px; /* Round corners */
+    z-index: 4; /* Ensure search form is above other elements while dragging */
+    top: 20px;
+    right: 20px;
+    width: 400px; /* Set the fixed width of the search bar */
+}
+
+.search-form input[type="text"] {
+    width: 0;
+    padding: 10px;
+    font-size: 1em;
+    border: none;
+    outline: none;
+    background: white;
+    color: black;
+    transition: width 0.5s ease;
+    border-radius: 30px; /* Round corners */
+}
+
+.search-form input[type="text"]:focus {
+    width: 300px; /* Adjust width as needed */
+    background-color: white;
+}
+
+.search-form button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    margin-left: 10px;
+}
+
+.search-form button img {
+    width: 20px;
+    height: 20px;
+}
+
+.suggestions {
+    position: absolute;
+    z-index: 3;
+    max-height: 200px;
+    overflow-y: auto;
+    display: none; /* Initially hidden */
+    background: red;
+    color: white;
+    border-radius: 0 0 5px 5px;
+}
+
+.suggestion-item {
+    padding: 10px;
+    cursor: pointer;
+}
+
+.suggestion-item:hover {
+    background: #ff4d4d;
+}
+
+.content-container {
+    width: 100%;
+    margin: 0 auto;
+    padding: 20px;
+    margin-top: 100vh; /* Push the content below the full-screen header */
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    background: none; /* Remove background */
+}
+
+h1 {
+    font-size: 2.5em;
+    margin-bottom: 10px;
+}
+
+p {
+    font-size: 1.2em;
+    margin-bottom: 20px;
+}
+
+.movie-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.movie-row {
+    display: flex;
+    overflow-x: auto;
+    gap: 10px;
+}
+
+.movie-item {
+    text-align: center;
+    min-width: 200px; /* Increased width */
+    flex: 0 0 auto;
+    background: transparent; /* Transparent background */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative; /* Added for positioning the number */
+}
+
+.movie-item img {
+    width: 200px; /* Increased width */
+    height: 300px; /* Increased height */
+    object-fit: cover; /* Ensure the image covers the entire area */
+}
+
+.movie-item .view-details-button,
+.movie-item .watch-now-button,
+.movie-item .recently-added-button {
+    margin-top: 10px;
+    padding: 10px 20px;
+    background: red; /* Solid red background for Watch Now button */
+    color: white;
+    border: none;
+    cursor: pointer;
+    width: 200px; /* Match the width of the movie thumbnail */
+    font-size: 1em;
+    border-radius: 5px;
+}
+
+.movie-item .watch-now-button {
+    background: red; /* Solid red background */
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); /* Increased min width */
+    gap: 20px;
+}
+
+#main-movie {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.movie-details {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.movie-details iframe, .movie-details img {
+    margin-bottom: 20px;
+}
+
+.movie-info {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 20px;
+}
+
+.movie-info img {
+    width: 300px;
+    height: auto;
+}
+
+.movie-info div {
+    max-width: 600px;
+}
+
+.section-title {
+    color: white;
+    font-weight: bold;
+}
+
+.top-movie-number {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    background: black;
+    color: white;
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2em;
+    font-weight: bold;
+}
+
+

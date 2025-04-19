@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ movie.Title | default('Movie Details', true) }} - Movie Recommender</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <a href="{{ url_for('index') }}" class="logo">MovieRec</a>
+            </nav>
+    </header>
+
+    <main class="content-container movie-details-page">
+        {% if movie %}
+            <section class="movie-main-info">
+                 <div class="movie-poster">
+                    <img src="{{ movie.poster_url | default(url_for('static', filename='images/placeholder.png'), true) }}" alt="Poster for {{ movie.Title }}">
+                </div>
+                 <div class="movie-text-details">
+                    <h1>{{ movie.Title | default('N/A', true) }}</h1>
+                    <p class="year-runtime">
+                        <span>{{ movie.Year | default('N/A', true) }}</span>
+                        {% if movie.Runtime %}
+                            <span>• {{ movie.Runtime }} min</span>
+                        {% endif %}
+                    </p>
+                    {% if movie.genres %}
+                    <p class="genres">
+                        Genres: {{ movie.genres | join(', ') }}
+                    </p>
+                    {% endif %}
+                    <p class="ratings">
+                        {% if movie.Rating %}
+                           <span title="Rating from dataset">Rating (CSV): {{ "%.1f"|format(movie.Rating) }}/10</span>
+                        {% endif %}
+                        {% if movie.tmdb_rating %}
+                            <span title="Rating from TMDB"> | TMDB: {{ "%.1f"|format(movie.tmdb_rating) }}/10 ({{ movie.tmdb_votes | default('N/A', true) }} votes)</span>
+                        {% endif %}
+                    </p>
+                     <div class="overview">
+                        <h2>Overview</h2>
+                        <p>{{ movie.overview | default('No overview available.', true) }}</p>
+                    </div>
+                     {% if movie.Director %}
+                        <p><strong>Director:</strong> {{ movie.Director }}</p>
+                    {% endif %}
+                    {% if movie.Writers %}
+                         <p><strong>Writers:</strong> {{ movie.Writers }}</p>
+                    {% endif %}
+                     {% if movie.release_date %}
+                        <p><strong>Release Date:</strong> {{ movie.release_date }}</p>
+                    {% endif %}
+                    {% if movie.status %}
+                        <p><strong>Status:</strong> {{ movie.status }}</p>
+                    {% endif %}
+                </div>
+            </section>
+
+             {% if movie.trailer_key or movie.csv_trailer_id %}
+                 <section class="movie-trailer movie-section">
+                     <h2 class="section-title">Trailer</h2>
+                     <div class="trailer-container">
+                         <iframe width="560" height="315"
+                                 src="https://www.youtube.com/embed/{{ movie.trailer_key or movie.csv_trailer_id }}"
+                                 title="YouTube video player for {{ movie.Title }}" frameborder="0"
+                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                 referrerpolicy="strict-origin-when-cross-origin" allowfullscreen>
+                         </iframe>
+                     </div>
+                 </section>
+             {% endif %}
+
+            {% if movie.cast %}
+                <section class="top-cast-section movie-section">
+                    <h2 class="section-title">Top Billed Cast</h2>
+                    <div class="cast-grid">
+                        {% for actor in movie.cast %}
+                            <div class="cast-item">
+                                <img src="{{ actor.profile_path | default(url_for('static', filename='images/placeholder_person.png'), true) }}" alt="{{ actor.name }}">
+                                <div class="cast-info">
+                                    <p class="actor-name"><strong>{{ actor.name | default('N/A', true) }}</strong></p>
+                                    <p class="character-name">{{ actor.character | default('N/A', true) }}</p>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </section>
+            {% endif %}
+
+             {% if recommendations %}
+                <section id="recommendations-section" class="movie-section recommendations-section">
+                    <h2 class="section-title">You Might Also Like</h2>
+                    <div id="recommendations-list" class="movie-row">
+                         {% for rec_movie in recommendations %}
+                            <div class="movie-item">
+                                <a href="{{ url_for('movie_details', movie_id=rec_movie.id) }}">
+                                    <img src="{{ rec_movie.poster_url | default(url_for('static', filename='images/placeholder.png'), true) }}" alt="{{ rec_movie.Title }}" loading="lazy">
+                                    <div class="movie-item-info">
+                                        <p class="movie-title">{{ rec_movie.Title | default('N/A', true) }}</p>
+                                        <p class="movie-year-rating">
+                                            <span>{{ rec_movie.Year | default('N/A', true) }}</span>
+                                            {% if rec_movie.Rating %}
+                                                <span>• {{ "%.1f"|format(rec_movie.Rating) }}/10</span>
+                                            {% endif %}
+                                        </p>
+                                    </div>
+                                </a>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </section>
+            {% endif %}
+
+        {% else %}
+             <p class="error-message">Movie details could not be loaded.</p>
+        {% endif %}
+    </main>
+
+    <footer>
+        <p>© 2024 Movie Recommender. All rights reserved.</p>
+    </footer>
+
+    </body>
+</html>

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Recommender</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <a href="{{ url_for('index') }}" class="logo">MovieRec</a>
+            <form id="recommendation-form" class="recommendation-form" method="POST" action="{{ url_for('recommend') }}">
+                <input type="text" id="movie-search-input" name="movie_title" placeholder="Enter a movie title for recommendations..." autocomplete="off" required>
+                <div id="suggestions-box" class="suggestions-box"></div>
+                <button type="submit">Get Recommendations</button>
+            </form>
+            </nav>
+    </header>
+
+    <main class="content-container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <div id="loading-indicator" class="loading-indicator" style="display: none;">Loading...</div>
+        <div id="error-message" class="error-message" style="display: none;"></div>
+
+        <section id="recommendations-section" class="movie-section recommendations-section" style="display: none;">
+            <div id="input-movie-display" class="input-movie-display">
+                </div>
+            <h2 class="section-title">Movies Recommended For You</h2>
+            <div id="recommendations-list" class="movie-grid">
+                </div>
+        </section>
+
+        <section id="default-movies-section" class="default-movies-section">
+             <section id="popular-section" class="movie-section">
+                <h2 class="section-title">Popular Movies</h2>
+                <div id="popular-movies-list" class="movie-row">
+                    </div>
+            </section>
+
+            <section id="trending-section" class="movie-section">
+                <h2 class="section-title">Trending Now</h2>
+                <div id="trending-movies-list" class="movie-row">
+                    </div>
+            </section>
+
+            <section id="trailers-section" class="movie-section">
+                <h2 class="section-title">Latest Trailers</h2>
+                <div id="latest-trailers-list" class="movie-row">
+                    </div>
+            </section>
+        </section>
+
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Movie Recommender. All rights reserved.</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>
